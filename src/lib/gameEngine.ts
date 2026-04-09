@@ -4,6 +4,7 @@
  */
 
 import { GBA_WIDTH, GBA_HEIGHT, TILE_SIZE, GameState, Entity, Vector2, PlayerStats, GunType, EnemyType } from './constants';
+import { audioManager } from './audio';
 
 // Simple PRNG
 export class Random {
@@ -24,7 +25,7 @@ const DEFAULT_STATS: PlayerStats = {
   damage: 1,
   fireRate: 0.8, // seconds between shots
   armor: 0,
-  jumpHeight: 7.2,
+  jumpHeight: 8.0,
   currentGun: 'pistol',
   bossesKilledTotal: 0,
   highScore: 0,
@@ -68,6 +69,11 @@ export const createInitialState = (seed: number, savedStats?: PlayerStats): Game
     levelChunks: generateInitialChunks(seed),
     bossActive: false,
     lastHeartScore: 0,
+    lastBossScore: 0,
+    cameraShake: 0,
+    displayScore: 0,
+    bufferedJump: 0,
+    jumpKeyWasDown: false,
     debug: false,
     seed,
   };
@@ -86,6 +92,7 @@ const generateInitialChunks = (seed: number): number[][] => {
 
   let x = 0;
   let anchorY = floorY;
+  const MAX_GAP = 10; // Maximum jumpable gap in tiles
 
   // Initial safe zone
   for (let i = 0; i < 40; i++) {
@@ -121,11 +128,11 @@ const generateInitialChunks = (seed: number): number[][] => {
           x++;
         }
         anchorY = newY;
-        x += rng.nextInt(2, 4); // Gap
+        x += Math.min(MAX_GAP, rng.nextInt(2, 5)); // Gap
       }
     } else if (roll < 0.9) {
       // 20% Chance: Large gaps
-      const gapLen = rng.nextInt(6, 9);
+      const gapLen = Math.min(MAX_GAP, rng.nextInt(6, 10));
       x += gapLen;
       anchorY = floorY;
       const platLen = rng.nextInt(15, 25);
@@ -148,7 +155,7 @@ const generateInitialChunks = (seed: number): number[][] => {
           x++;
         }
         anchorY = newY;
-        x += rng.nextInt(3, 5);
+        x += Math.min(MAX_GAP - 2, rng.nextInt(3, 6)); // Gap between steps
       }
       // Drop back to floor
       x += 4;
@@ -173,21 +180,80 @@ export const updateGame = (state: GameState, inputs: Set<string>, deltaTime: num
   // 1. Difficulty Scaling
   newState.scrollSpeed = 1.2 + (newState.score / 20000) * 1.2;
   if (newState.scrollSpeed > 2.4) newState.scrollSpeed = 2.4;
+
+  // Score Interpolation
+  if (newState.displayScore < newState.score) {
+    newState.displayScore += Math.ceil((newState.score - newState.displayScore) * 0.1);
+  }
   
-  // 2. Auto-scroll
-  newState.scrollX += newState.scrollSpeed;
+  // 2. Auto-scroll & Camera Chasing
+  let extraScroll = 0;
+  const targetX = 60; // Moved slightly more to the right for better visibility
+  const isDashing = player.dashTimer && player.dashTimer > 0;
+  
+  if (player.pos.x > targetX && !isDashing) {
+    // Elastic catch-up: the further ahead the player is, the faster the camera "chases" them
+    // Softened the pull-back to allow for "leaping" forward
+    extraScroll = (player.pos.x - targetX) * 0.05; 
+    player.pos.x -= extraScroll;
+  }
+  
+  newState.scrollX += newState.scrollSpeed + extraScroll;
   newState.score += 1;
 
   // 3. Player Physics & Input
-  const GRAVITY = 0.35;
-  
+  const GRAVITY = 0.25;
+  const MOVE_ACCEL = 0.4;
+  const MAX_MOVE_SPEED = 2.5;
+  const FRICTION = 0.85;
+  const AIR_CONTROL = 0.6;
+  const TERMINAL_VELOCITY = 6.0;
+
+  const isOnGround = checkGroundCollision(player, newState);
+
+  // Horizontal Movement Input
+  if (inputs.has('LEFT')) {
+    player.vel.x -= (isOnGround ? MOVE_ACCEL : MOVE_ACCEL * AIR_CONTROL);
+  } else if (inputs.has('RIGHT')) {
+    player.vel.x += (isOnGround ? MOVE_ACCEL : MOVE_ACCEL * AIR_CONTROL);
+  } else {
+    player.vel.x *= FRICTION;
+  }
+
+  // Cap horizontal speed
+  if (player.vel.x > MAX_MOVE_SPEED) player.vel.x = MAX_MOVE_SPEED;
+  if (player.vel.x < -MAX_MOVE_SPEED) player.vel.x = -MAX_MOVE_SPEED;
+
+  player.pos.x += player.vel.x;
+
+  // Hit Flash Decay
+  if (player.hitFlash && player.hitFlash > 0) player.hitFlash -= 1;
+  newState.enemies.forEach(e => {
+    if (e.hitFlash && e.hitFlash > 0) e.hitFlash -= 1;
+  });
+  if (newState.boss && newState.boss.hitFlash && newState.boss.hitFlash > 0) {
+    newState.boss.hitFlash -= 1;
+  }
+
   // Dash Logic
   if (player.dashTimer && player.dashTimer > 0) {
     player.dashTimer -= 1;
-    player.pos.x += 4; // Dash speed
+    // Split dash speed: player lunges forward, but camera also speeds up to "follow"
+    const dashSpeed = 4;
+    const playerLunge = dashSpeed * 0.6;
+    const cameraFollow = dashSpeed * 0.4;
+    
+    player.pos.x += playerLunge;
+    newState.scrollX += cameraFollow;
     player.vel.y = 0; // Hover during dash
+    
+    // Dash particles (Speed Lines)
+    if (player.dashTimer % 2 === 0) {
+      spawnParticle(newState, player.pos.x, player.pos.y + Math.random() * player.size.y, 'dash');
+    }
   } else {
     player.vel.y += GRAVITY;
+    if (player.vel.y > TERMINAL_VELOCITY) player.vel.y = TERMINAL_VELOCITY;
   }
 
   if (player.dashCooldown && player.dashCooldown > 0) {
@@ -198,45 +264,76 @@ export const updateGame = (state: GameState, inputs: Set<string>, deltaTime: num
     player.dashTimer = 10;
     player.dashCooldown = 40;
     spawnParticle(newState, player.pos.x, player.pos.y + 8, 'flash');
+    audioManager.playSound('dash');
   }
 
-  // Jump
-  const isOnGround = checkGroundCollision(player, newState);
+  // Jump Input Buffering
+  const jumpPressed = inputs.has('A');
+  if (jumpPressed && !state.jumpKeyWasDown) {
+    newState.bufferedJump = 10; // Buffer for 10 frames
+  }
+  newState.jumpKeyWasDown = jumpPressed;
+
+  // Jump Execution
+  if (newState.bufferedJump > 0) {
+    if (isOnGround || (player.coyoteTimer && player.coyoteTimer > 0)) {
+      // First Jump (Ground or Coyote)
+      player.vel.y = -playerStats.jumpHeight;
+      if (inputs.has('RIGHT')) {
+        player.vel.x += 1.0;
+      }
+      player.coyoteTimer = 0;
+      newState.bufferedJump = 0;
+      player.canDoubleJump = true; // Reset double jump availability
+      player.state = 'jumping'; // Track jump state
+      player.hasJumpedInAir = false; // Reset air jump tracker
+      spawnParticle(newState, player.pos.x + player.size.x / 2, player.pos.y + player.size.y, 'dust');
+      audioManager.playSound('jump');
+    } else if (!player.hasJumpedInAir) {
+      // First Jump in Air (e.g. walked off ledge)
+      player.vel.y = -playerStats.jumpHeight;
+      player.hasJumpedInAir = true;
+      player.canDoubleJump = true; // Still have double jump available
+      newState.bufferedJump = 0;
+      spawnParticle(newState, player.pos.x + player.size.x / 2, player.pos.y + player.size.y, 'dust');
+      audioManager.playSound('jump');
+    } else if (player.canDoubleJump) {
+      // Double Jump (In Air)
+      // Reset velocity completely to ensure the jump always feels the same regardless of fall speed
+      player.vel.y = -playerStats.jumpHeight * 1.1; // Make double jump slightly stronger (110%)
+      
+      if (inputs.has('RIGHT')) {
+        player.vel.x += 1.5;
+      }
+      player.canDoubleJump = false; // Consume double jump
+      player.state = 'double_jumping'; // Track double jump state
+      newState.bufferedJump = 0;
+      spawnParticle(newState, player.pos.x + player.size.x / 2, player.pos.y + player.size.y, 'flash');
+      audioManager.playSound('jump');
+    }
+  }
+
+  // Update Coyote Timer & Double Jump availability
   if (isOnGround) {
     player.canDoubleJump = true;
-    player.coyoteTimer = 10; // Coyote Time: 10 frames
+    player.hasJumpedInAir = false;
+    player.coyoteTimer = 30; // Coyote Time: 30 frames (0.5s)
+    player.state = 'idle';
   } else if (player.coyoteTimer && player.coyoteTimer > 0) {
     player.coyoteTimer -= 1;
   }
 
-  // Horizontal target position (Velocity Lock: only apply when grounded or dashing)
-  const targetX = 40;
-  const isDashing = player.dashTimer && player.dashTimer > 0;
-  if (isOnGround || isDashing) {
-    if (player.pos.x > targetX && !isDashing) {
-      player.pos.x -= 1; // Return to target position after dash
-      if (player.pos.x < targetX) player.pos.x = targetX;
-    }
-    if (player.pos.x < targetX) {
-      player.pos.x += 0.5; // Slowly move back to target position
-    }
+  if (newState.bufferedJump > 0) newState.bufferedJump -= 1;
+
+  // Variable Jump Height: If button released while moving up, cut velocity
+  // Only cut if it's a regular jump, and don't cut if we just started jumping
+  if (!jumpPressed && player.vel.y < -3 && player.state !== 'double_jumping') {
+    player.vel.y *= 0.6; // Less aggressive cut
   }
 
-  const canJump = isOnGround || (player.coyoteTimer && player.coyoteTimer > 0);
-
-  if (inputs.has('A')) {
-    if (canJump) {
-      player.vel.y = -playerStats.jumpHeight;
-      player.canDoubleJump = true;
-      player.coyoteTimer = 0; // Consume coyote time
-      spawnParticle(newState, player.pos.x + player.size.x / 2, player.pos.y + player.size.y, 'dust');
-      inputs.delete('A'); // Prevent held key from double jumping instantly
-    } else if (player.canDoubleJump) {
-      player.vel.y = -playerStats.jumpHeight * 0.8;
-      player.canDoubleJump = false;
-      spawnParticle(newState, player.pos.x + player.size.x / 2, player.pos.y + player.size.y, 'flash');
-      inputs.delete('A');
-    }
+  // Horizontal target position (Handled by Camera Chasing above)
+  if (player.pos.x < targetX && !inputs.has('LEFT') && !inputs.has('RIGHT')) {
+    player.pos.x += 0.2; // Slightly faster return to target position when not moving
   }
 
   player.pos.y += player.vel.y;
@@ -350,6 +447,12 @@ export const updateGame = (state: GameState, inputs: Set<string>, deltaTime: num
     playerStats.highScore = newState.score;
   }
 
+  // Camera Shake Decay
+  if (newState.cameraShake > 0) {
+    newState.cameraShake *= 0.9;
+    if (newState.cameraShake < 0.1) newState.cameraShake = 0;
+  }
+
   if (player.pos.y > GBA_HEIGHT) {
     newState.isGameOver = true;
   }
@@ -360,9 +463,10 @@ export const updateGame = (state: GameState, inputs: Set<string>, deltaTime: num
 const checkGroundCollision = (entity: Entity, state: GameState): boolean => {
   if (entity.vel.y < 0) return false;
 
+  // Use a 2px detection box below the entity to prevent flickering
   const points = [
-    { x: entity.pos.x + 2, y: entity.pos.y + entity.size.y + 1 },
-    { x: entity.pos.x + entity.size.x - 2, y: entity.pos.y + entity.size.y + 1 }
+    { x: entity.pos.x + 2, y: entity.pos.y + entity.size.y + 2 },
+    { x: entity.pos.x + entity.size.x - 2, y: entity.pos.y + entity.size.y + 2 }
   ];
 
   return points.some(p => {
@@ -417,25 +521,68 @@ export const getHitbox = (entity: Entity) => {
 const takeDamage = (state: GameState) => {
   const { player } = state;
   player.hp -= 1;
-  player.invincibleTimer = 60; // 1 second
+  player.invincibleTimer = 90; // 1.5 seconds
   player.pos.x -= 20; // Recoil
+  player.hitFlash = 10;
+  state.cameraShake = 5;
   spawnParticle(state, player.pos.x, player.pos.y, 'hit');
+  audioManager.playSound('hit_player');
   if (player.hp <= 0) {
     state.isGameOver = true;
+    audioManager.playSound('game_over');
   }
 };
 
 const spawnParticle = (state: GameState, x: number, y: number, type: string) => {
-  const color = type === 'dust' ? '#CCCCCC' : type === 'hit' ? '#FF0000' : type === 'flash' ? '#FFFF00' : '#FFFFFF';
-  const size = type === 'flash' ? 4 : 2;
+  let color = '#FFFFFF';
+  let size = { x: 2, y: 2 };
+  let hp = 20;
+  let vel = { x: (Math.random() - 0.5) * 2, y: (Math.random() - 0.5) * 2 };
+
+  switch (type) {
+    case 'dust':
+      color = '#CCCCCC';
+      vel = { x: (Math.random() - 0.5) * 1, y: -Math.random() * 1 };
+      break;
+    case 'hit':
+      color = '#FF0000';
+      hp = 30;
+      vel = { x: (Math.random() - 0.5) * 4, y: (Math.random() - 0.5) * 4 };
+      break;
+    case 'flash':
+      color = '#FFFF00';
+      size = { x: 4, y: 4 };
+      hp = 5;
+      vel.y = (Math.random() - 0.5);
+      break;
+    case 'dash':
+      color = '#60a5fa'; // Blue speed lines
+      size = { x: 8, y: 1 };
+      hp = 10;
+      vel = { x: -4, y: 0 };
+      break;
+    case 'debris':
+      color = '#4ade80'; // Default green
+      size = { x: 2, y: 2 };
+      hp = 40;
+      vel = { x: (Math.random() - 0.5) * 3, y: (Math.random() - 0.5) * 3 };
+      break;
+    case 'explosion':
+      color = '#fbbf24'; // Amber
+      size = { x: 4, y: 4 };
+      hp = 20;
+      vel = { x: (Math.random() - 0.5) * 5, y: (Math.random() - 0.5) * 5 };
+      break;
+  }
+
   state.particles.push({
     id: Math.random().toString(),
     type: 'particle',
     pos: { x, y },
-    vel: { x: (Math.random() - 0.5) * 2, y: (Math.random() - 0.5) * (type === 'flash' ? 1 : 2) },
-    size: { x: size, y: size },
-    hp: type === 'flash' ? 5 : 20,
-    maxHp: type === 'flash' ? 5 : 20,
+    vel,
+    size,
+    hp,
+    maxHp: hp,
     active: true,
     color
   });
@@ -449,27 +596,29 @@ const fireWeapon = (state: GameState) => {
   spawnParticle(state, player.pos.x + player.size.x, player.pos.y + 6, 'flash');
 
   if (gun === 'pistol') {
+    audioManager.playSound('shoot_pistol');
     state.bullets.push({
       id: Math.random().toString(),
       type: 'bullet',
       subType: 'pistol',
       pos: { x: player.pos.x + player.size.x, y: player.pos.y + 6 },
-      vel: { x: 6, y: 0 },
-      size: { x: 4, y: 2 },
+      vel: { x: 8, y: 0 },
+      size: { x: 6, y: 3 },
       hp: 1,
       maxHp: 1,
       active: true,
       damage: playerStats.damage,
     });
   } else if (gun === 'spread') {
+    audioManager.playSound('shoot_spread');
     for (let i = -1; i <= 1; i++) {
       state.bullets.push({
         id: Math.random().toString(),
         type: 'bullet',
         subType: 'spread',
         pos: { x: player.pos.x + player.size.x, y: player.pos.y + 6 },
-        vel: { x: 5, y: i * 1.5 },
-        size: { x: 4, y: 4 },
+        vel: { x: 7, y: i * 1.5 },
+        size: { x: 5, y: 5 },
         hp: 1,
         maxHp: 1,
         active: true,
@@ -477,6 +626,7 @@ const fireWeapon = (state: GameState) => {
       });
     }
   } else if (gun === 'laser') {
+    audioManager.playSound('shoot_laser');
     state.bullets.push({
       id: Math.random().toString(),
       type: 'bullet',
@@ -490,6 +640,7 @@ const fireWeapon = (state: GameState) => {
       damage: playerStats.damage,
     });
   } else if (gun === 'grenade') {
+    audioManager.playSound('shoot_grenade');
     state.bullets.push({
       id: Math.random().toString(),
       type: 'bullet',
@@ -508,10 +659,19 @@ const fireWeapon = (state: GameState) => {
 const spawnEnemies = (state: GameState) => {
   if (state.bossActive) return;
 
-  const spawnRate = 180 - Math.min(100, Math.floor(state.score / 2000) * 10);
+  // DDA: Adjust spawn rate based on player performance
+  // If player is low on HP, slow down spawns
+  const hpFactor = state.player.hp / state.player.maxHp;
+  const ddaSpawnDelay = hpFactor < 0.5 ? 60 : 0; // Extra frames delay if low HP
+
+  const spawnRate = (240 - Math.min(120, Math.floor(state.score / 2000) * 15)) + ddaSpawnDelay;
   if (state.score % spawnRate === 0) {
     const rng = new Random(state.seed + state.score);
     
+    // Safety Check: Don't spawn if there's already an enemy too close to the spawn point
+    const tooClose = state.enemies.some(e => e.pos.x > GBA_WIDTH - 40);
+    if (tooClose) return;
+
     // Diversity Logic: Create a pool of available types
     const availableTypes: EnemyType[] = ['walker', 'shooter', 'flyer', 'runner'];
     if (state.score > 8000) availableTypes.push('heavy');
@@ -526,7 +686,7 @@ const spawnEnemies = (state: GameState) => {
     let hp = 1;
     let color = '#00FF00';
     let size = { x: 8, y: 12 };
-    let vel = { x: -1.5, y: 0 };
+    let vel = { x: -1.0, y: 0 };
 
     // Anchor System: Find ground at spawn point
     const worldX = state.scrollX + GBA_WIDTH;
@@ -566,7 +726,7 @@ const spawnEnemies = (state: GameState) => {
         color = '#4ade80'; // Emerald
         break;
       case 'shooter':
-        hp = 2;
+        hp = 1;
         color = '#f87171'; // Red
         break;
       case 'flyer':
@@ -576,10 +736,10 @@ const spawnEnemies = (state: GameState) => {
       case 'runner':
         hp = 1;
         color = '#60a5fa'; // Blue
-        vel.x = -2.5;
+        vel.x = -1.8;
         break;
       case 'heavy':
-        hp = 4;
+        hp = 1;
         color = '#94a3b8'; // Slate
         size = { x: 16, y: 16 };
         break;
@@ -596,10 +756,9 @@ const spawnEnemies = (state: GameState) => {
       }
     }
 
-    // Elite Variation: 15% chance for an "Elite" enemy with more HP and distinct color
+    // Elite Variation: 15% chance for an "Elite" enemy with distinct color
     const isElite = rng.next() > 0.85;
     if (isElite) {
-      hp *= 2;
       color = '#a855f7'; // Purple for Elites
       size.x *= 1.2;
       size.y *= 1.2;
@@ -648,20 +807,46 @@ const updateEnemies = (state: GameState) => {
 
     // Collision with player
     if (checkCollision(e, player) && !player.invincibleTimer) {
-      takeDamage(state);
+      // Goomba Stomp Logic
+      const isFalling = player.vel.y > 0;
+      const isAbove = player.pos.y + player.size.y < e.pos.y + e.size.y / 2;
+      
+      if (isFalling && isAbove) {
+        // Stomp!
+        e.hp = 0;
+        e.active = false;
+        player.vel.y = -state.playerStats.jumpHeight * 0.8; // Bounce
+        player.canDoubleJump = true; // Refresh double jump
+        player.hasJumpedInAir = false;
+        
+        state.score += 200; // Bonus for stomping
+        state.combo += 1;
+        state.comboTimer = 120;
+        
+        for (let i = 0; i < 6; i++) spawnParticle(state, e.pos.x, e.pos.y, 'debris');
+        spawnParticle(state, e.pos.x, e.pos.y, 'explosion');
+        audioManager.playSound('death_enemy');
+        audioManager.playSound('jump'); // Bounce sound
+      } else {
+        takeDamage(state);
+      }
     }
 
     // Collision with bullets
     state.bullets.forEach(b => {
       if (checkCollision(b, e)) {
         e.hp -= b.damage || 1;
+        e.hitFlash = 5;
         if (b.subType !== 'laser') b.active = false;
+        audioManager.playSound('hit_enemy');
         if (e.hp <= 0) {
           e.active = false;
           state.score += 100;
           state.combo += 1;
           state.comboTimer = 120;
+          for (let i = 0; i < 6; i++) spawnParticle(state, e.pos.x, e.pos.y, 'debris');
           spawnParticle(state, e.pos.x, e.pos.y, 'explosion');
+          audioManager.playSound('death_enemy');
         }
       }
     });
@@ -672,20 +857,22 @@ const updateEnemies = (state: GameState) => {
 
 const updateBoss = (state: GameState) => {
   const BOSS_THRESHOLD = 5000;
-  if (state.score > 0 && state.score % BOSS_THRESHOLD === 0 && !state.bossActive) {
+  if (state.score > 0 && state.score % BOSS_THRESHOLD === 0 && !state.bossActive && (state.lastBossScore || 0) < state.score) {
     state.bossActive = true;
+    state.lastBossScore = state.score;
     state.boss = {
       id: 'boss',
       type: 'boss',
       pos: { x: GBA_WIDTH + 40, y: 40 },
       vel: { x: -0.5, y: 0.5 },
       size: { x: 48, y: 48 },
-      hp: 10 + Math.floor(state.score / 2000),
-      maxHp: 10 + Math.floor(state.score / 2000),
+      hp: 15 + Math.floor(state.score / 2000) * 5,
+      maxHp: 15 + Math.floor(state.score / 2000) * 5,
       active: true,
       color: '#888888',
       state: 'phase1',
     };
+    state.cameraShake = 10;
   }
 
   if (state.bossActive && state.boss) {
@@ -693,95 +880,106 @@ const updateBoss = (state: GameState) => {
     b.pos.y += Math.sin(state.score * 0.05) * 1;
     if (b.pos.x > GBA_WIDTH - 60) b.pos.x -= 0.5;
 
+    // Phase transitions
+    const hpPercent = b.hp / b.maxHp;
+    if (hpPercent < 0.33) b.state = 'phase3';
+    else if (hpPercent < 0.66) b.state = 'phase2';
+
     // Player-Boss collision
     if (checkCollision(state.player, b) && !state.player.invincibleTimer) {
       takeDamage(state);
     }
 
-    // Player-Boss Arm collision (Tip only)
+    // Player-Boss Arm collision (Actual Shield Collision)
     const rotation = (state.score * 0.05);
+    const armAngles: number[] = [];
     for (let i = 0; i < 3; i++) {
-      const angle = rotation + (i * Math.PI * 2) / 3;
+      const angle = (rotation + (i * Math.PI * 2) / 3) % (Math.PI * 2);
+      armAngles.push(angle);
       const armX = b.pos.x + 24 + Math.cos(angle) * 30;
       const armY = b.pos.y + 24 + Math.sin(angle) * 30;
       
-      // Tip is a 6x6 area at the end
-      const tip = { 
-        pos: { x: armX - 3, y: armY - 3 }, 
-        size: { x: 6, y: 6 }, 
+      const armPart = { 
+        pos: { x: armX - 4, y: armY - 4 }, 
+        size: { x: 8, y: 8 }, 
         type: 'enemy' 
       } as Entity;
       
-      if (checkCollision(state.player, tip) && !state.player.invincibleTimer) {
+      if (checkCollision(state.player, armPart) && !state.player.invincibleTimer) {
         takeDamage(state);
       }
     }
 
     // Boss Attacks
-    const attackRate = b.hp < b.maxHp / 2 ? 90 : 120;
+    const attackRate = b.state === 'phase3' ? 60 : b.state === 'phase2' ? 90 : 120;
     if (state.score % attackRate === 0) {
-      state.enemyBullets.push({
-        id: Math.random().toString(),
-        type: 'bullet',
-        pos: { x: b.pos.x, y: b.pos.y + 24 },
-        vel: { x: -3, y: (state.player.pos.y - b.pos.y - 24) / 60 },
-        size: { x: 8, y: 4 },
-        hp: 1,
-        maxHp: 1,
-        active: true,
-        color: '#FF0000',
-      });
+      const numMissiles = b.state === 'phase3' ? 2 : 1;
+      for (let i = 0; i < numMissiles; i++) {
+        state.enemyBullets.push({
+          id: Math.random().toString(),
+          type: 'bullet',
+          pos: { x: b.pos.x, y: b.pos.y + 24 + (i * 10 - 5) },
+          vel: { x: -3, y: (state.player.pos.y - b.pos.y - 24) / 60 + (i * 0.5 - 0.25) },
+          size: { x: 8, y: 4 },
+          hp: 1,
+          maxHp: 1,
+          active: true,
+          color: '#FF0000',
+        });
+      }
     }
 
     // Collision with bullets
     state.bullets.forEach(bullet => {
       if (checkCollision(bullet, b)) {
-        // Shield logic: only damage if gap aligns
-        const rotation = (state.score * 0.05) % (Math.PI * 2);
-        const angleToBullet = Math.atan2(bullet.pos.y - (b.pos.y + 24), bullet.pos.x - (b.pos.x + 24));
-        // Simplified: 1/3 chance to hit or based on rotation
-        if (Math.random() > 0.3) {
-          b.hp -= bullet.damage || 1;
-          bullet.active = false;
+        // Shield logic: check if bullet angle hits an arm
+        const bulletAngle = Math.atan2(bullet.pos.y - (b.pos.y + 24), bullet.pos.x - (b.pos.x + 24));
+        const normalizedBulletAngle = (bulletAngle + Math.PI * 2) % (Math.PI * 2);
+        
+        let hitShield = false;
+        for (const armAngle of armAngles) {
+          const diff = Math.abs(normalizedBulletAngle - armAngle);
+          const wrappedDiff = Math.min(diff, Math.PI * 2 - diff);
+          if (wrappedDiff < 0.4) { // Shield width
+            hitShield = true;
+            break;
+          }
         }
 
-        if (b.hp <= 0) {
-          b.active = false;
-          state.bossActive = false;
-          state.score += 1000;
-          state.playerStats.bossesKilledTotal += 1;
-          // Drop upgrade
-          state.upgrades.push({
-            id: 'upgrade',
-            type: 'upgrade',
-            pos: { x: b.pos.x, y: b.pos.y },
-            vel: { x: -1, y: 1 },
-            size: { x: 8, y: 8 },
-            hp: 1,
-            maxHp: 1,
-            active: true,
-            color: '#00FF00',
-          });
+        if (hitShield) {
+          bullet.active = false;
+          audioManager.playSound('boss_hit');
+          spawnParticle(state, bullet.pos.x, bullet.pos.y, 'flash');
+        } else {
+          b.hp -= bullet.damage || 1;
+          b.hitFlash = 5;
+          bullet.active = false;
+          audioManager.playSound('hit_enemy');
+          if (b.hp <= 0) {
+            b.active = false;
+            state.bossActive = false;
+            state.score += 1000;
+            state.playerStats.bossesKilledTotal += 1;
+            state.cameraShake = 20;
+            audioManager.playSound('boss_death');
+            for (let i = 0; i < 20; i++) spawnParticle(state, b.pos.x + 24, b.pos.y + 24, 'explosion');
+            // Drop upgrade
+            state.upgrades.push({
+              id: 'upgrade',
+              type: 'upgrade',
+              pos: { x: b.pos.x, y: b.pos.y },
+              vel: { x: -1, y: 1 },
+              size: { x: 8, y: 8 },
+              hp: 1,
+              maxHp: 1,
+              active: true,
+              color: '#00FF00',
+            });
+          }
         }
       }
     });
   }
-
-  // Update Upgrades
-  state.upgrades = state.upgrades.filter(u => u.active).map(u => {
-    u.pos.x += u.vel.x;
-    u.pos.y += u.vel.y;
-    if (u.pos.y > GBA_HEIGHT - 24) {
-      u.pos.y = GBA_HEIGHT - 24;
-      u.vel.y = 0;
-    }
-    
-    if (checkCollision(u, state.player)) {
-      u.active = false;
-      applyUpgrade(state);
-    }
-    return u;
-  });
 };
 
 const applyUpgrade = (state: GameState) => {
@@ -799,7 +997,11 @@ const applyUpgrade = (state: GameState) => {
 };
 
 const spawnItems = (state: GameState) => {
-  const HEART_INTERVAL = 10000;
+  // DDA: Spawn hearts more frequently if player is low on HP
+  const hpFactor = state.player.hp / state.player.maxHp;
+  const ddaIntervalReduction = hpFactor < 0.4 ? 4000 : 0;
+
+  const HEART_INTERVAL = 10000 - ddaIntervalReduction;
   if (state.score - (state.lastHeartScore || 0) >= HEART_INTERVAL) {
     state.lastHeartScore = state.score;
     
@@ -841,9 +1043,27 @@ const updateItems = (state: GameState) => {
       i.active = false;
       if (i.type === 'heart') {
         state.player.hp = Math.min(state.player.maxHp, state.player.hp + 1);
+        audioManager.playSound('upgrade');
         spawnParticle(state, i.pos.x, i.pos.y, 'flash');
       }
     }
     return i;
+  });
+
+  // Update Upgrades
+  state.upgrades = state.upgrades.filter(u => u.active).map(u => {
+    u.pos.x += u.vel.x;
+    u.pos.y += u.vel.y;
+    if (u.pos.y > GBA_HEIGHT - 24) {
+      u.pos.y = GBA_HEIGHT - 24;
+      u.vel.y = 0;
+    }
+    
+    if (checkCollision(u, state.player)) {
+      u.active = false;
+      audioManager.playSound('upgrade');
+      applyUpgrade(state);
+    }
+    return u;
   });
 };

@@ -54,9 +54,12 @@ export interface Entity {
   dashTimer?: number;
   dashCooldown?: number;
   canDoubleJump?: boolean;
+  hasJumpedInAir?: boolean;
   coyoteTimer?: number;
   state?: string;
   frame?: number;
+  animationTimer?: number;
+  hitFlash?: number;
 }
 
 export interface PlayerStats {
@@ -91,11 +94,20 @@ export interface GameState {
   boss?: Entity;
   lastEnemyType?: EnemyType;
   lastHeartScore?: number;
+  lastBossScore?: number;
+  cameraShake: number;
+  displayScore: number;
+  bufferedJump: number;
+  jumpKeyWasDown: boolean;
   debug: boolean;
   seed: number;
 }
 
-export const INPUT_MAP = {
+export type GameAction = 'A' | 'B' | 'UP' | 'DOWN' | 'LEFT' | 'RIGHT' | 'START' | 'SELECT' | 'DASH';
+
+export type InputMap = Record<string, GameAction>;
+
+export const DEFAULT_INPUT_MAP: InputMap = {
   KeyX: 'A', // Jump
   KeyZ: 'B', // Shoot
   ArrowUp: 'UP',

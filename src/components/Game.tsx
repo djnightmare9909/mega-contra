@@ -4,10 +4,10 @@
  */
 
 import React, { useEffect, useRef, useState } from 'react';
-import { GBA_WIDTH, GBA_HEIGHT, COLORS, INPUT_MAP, GameState, TILE_SIZE, PlayerStats } from '../lib/constants';
+import { GBA_WIDTH, GBA_HEIGHT, COLORS, DEFAULT_INPUT_MAP, InputMap, GameAction, GameState, TILE_SIZE, PlayerStats } from '../lib/constants';
 import { createInitialState, updateGame, getHitbox } from '../lib/gameEngine';
 import { motion, AnimatePresence } from 'motion/react';
-import { Trophy, Play, RotateCcw, Pause, Heart, Zap, Shield, ArrowUpCircle, Target } from 'lucide-react';
+import { Trophy, Play, RotateCcw, Pause, Heart, Zap, Shield, ArrowUpCircle, Target, Settings, Keyboard } from 'lucide-react';
 
 export default function Game() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -16,6 +16,11 @@ export default function Game() {
     const stats = saved ? JSON.parse(saved) : undefined;
     return createInitialState(Date.now(), stats);
   });
+  const [inputMap, setInputMap] = useState<InputMap>(() => {
+    const saved = localStorage.getItem('mega_contra_input_map');
+    return saved ? JSON.parse(saved) : DEFAULT_INPUT_MAP;
+  });
+  const [remappingAction, setRemappingAction] = useState<GameAction | null>(null);
   const [inputs] = useState<Set<string>>(new Set());
   const requestRef = useRef<number>(null);
   const lastTimeRef = useRef<number>(0);
@@ -28,7 +33,22 @@ export default function Game() {
   // Handle Keyboard Inputs
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      const gbaKey = INPUT_MAP[e.code as keyof typeof INPUT_MAP];
+      if (remappingAction) {
+        const newMap = { ...inputMap };
+        // Remove any existing key that maps to this action
+        Object.keys(newMap).forEach(k => {
+          if (newMap[k] === remappingAction) delete newMap[k];
+        });
+        // Assign new key
+        newMap[e.code] = remappingAction;
+        setInputMap(newMap);
+        localStorage.setItem('mega_contra_input_map', JSON.stringify(newMap));
+        setRemappingAction(null);
+        e.preventDefault();
+        return;
+      }
+
+      const gbaKey = inputMap[e.code];
       if (gbaKey) {
         inputs.add(gbaKey);
         if (gbaKey === 'START') {
@@ -39,7 +59,7 @@ export default function Game() {
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
-      const gbaKey = INPUT_MAP[e.code as keyof typeof INPUT_MAP];
+      const gbaKey = inputMap[e.code];
       if (gbaKey) {
         inputs.delete(gbaKey);
         e.preventDefault();
@@ -52,7 +72,7 @@ export default function Game() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [inputs]);
+  }, [inputs, inputMap, remappingAction]);
 
   const animate = (time: number) => {
     if (lastTimeRef.current !== undefined) {
@@ -85,16 +105,49 @@ export default function Game() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    ctx.save();
+    // Screen Shake
+    if (state.cameraShake > 0) {
+      const shakeX = (Math.random() - 0.5) * state.cameraShake;
+      const shakeY = (Math.random() - 0.5) * state.cameraShake;
+      ctx.translate(shakeX, shakeY);
+    }
+
     // 1. Clear & Sky
     ctx.fillStyle = COLORS.BG_SKY;
     ctx.fillRect(0, 0, GBA_WIDTH, GBA_HEIGHT);
 
-    // Parallax Sky
+    // Stars (if score > 10k)
+    if (state.score > 10000) {
+      ctx.fillStyle = 'white';
+      for (let i = 0; i < 20; i++) {
+        const sx = (Math.sin(i * 123.45) * 0.5 + 0.5) * GBA_WIDTH;
+        const sy = (Math.cos(i * 678.90) * 0.5 + 0.5) * 60;
+        const op = 0.5 + Math.sin(state.score * 0.05 + i) * 0.5;
+        ctx.globalAlpha = op;
+        ctx.fillRect(sx, sy, 1, 1);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // Parallax Sky (Clouds)
     ctx.fillStyle = COLORS.BG_SKY_DARK;
     const skyX = (state.scrollX * 0.2) % GBA_WIDTH;
     ctx.fillRect(GBA_WIDTH - skyX, 20, 30, 10);
     ctx.fillRect(GBA_WIDTH - skyX - 100, 40, 40, 15);
     ctx.fillRect(GBA_WIDTH - skyX + 100, 30, 50, 12);
+
+    // Parallax Layer 3 (Distant Mountains)
+    ctx.fillStyle = '#1e3a3a'; // Darker teal
+    const distMountainX = (state.scrollX * 0.3) % GBA_WIDTH;
+    for (let i = -1; i < 2; i++) {
+      const x = i * GBA_WIDTH - distMountainX;
+      ctx.beginPath();
+      ctx.moveTo(x, GBA_HEIGHT - 16);
+      ctx.lineTo(x + 100, GBA_HEIGHT - 120);
+      ctx.lineTo(x + 200, GBA_HEIGHT - 16);
+      ctx.fill();
+    }
 
     // 2. Parallax Midground (Hills)
     ctx.fillStyle = COLORS.BG_MID;
@@ -188,6 +241,14 @@ export default function Game() {
       // Details based on type
       ctx.fillStyle = 'black';
       ctx.fillRect(e.pos.x + 2, e.pos.y + 2, 2, 2);
+
+      // Hit Flash
+      if (e.hitFlash && e.hitFlash > 0) {
+        ctx.fillStyle = 'white';
+        ctx.globalAlpha = 0.8;
+        ctx.fillRect(e.pos.x, e.pos.y, e.size.x, e.size.y);
+        ctx.globalAlpha = 1.0;
+      }
     });
 
     // 7. Enemy Bullets
@@ -198,14 +259,47 @@ export default function Game() {
 
     // 8. Player
     if (!state.player.invincibleTimer || state.player.invincibleTimer % 4 < 2) {
+      const p = state.player;
+      const isRunning = p.vel.y === 0 && !p.dashTimer;
+      const isJumping = p.vel.y < 0;
+      const isFalling = p.vel.y > 0;
+      const isDashing = p.dashTimer && p.dashTimer > 0;
+
       ctx.fillStyle = COLORS.PLAYER;
-      ctx.fillRect(state.player.pos.x, state.player.pos.y, state.player.size.x, state.player.size.y);
-      // Bandana
+      
+      // Animated Run Cycle (4 frames)
+      let offsetY = 0;
+      if (isRunning) {
+        const frame = Math.floor(state.score / 5) % 4;
+        if (frame === 1 || frame === 3) offsetY = -1;
+      }
+
+      ctx.fillRect(p.pos.x, p.pos.y + offsetY, p.size.x, p.size.y);
+      
+      // Bandana (Animated)
       ctx.fillStyle = COLORS.PLAYER_ACCENT;
-      ctx.fillRect(state.player.pos.x, state.player.pos.y, state.player.size.x, 2);
+      const bandanaOffset = isRunning ? (Math.floor(state.score / 5) % 2) : 0;
+      ctx.fillRect(p.pos.x - 2 - bandanaOffset, p.pos.y + 2 + offsetY, 4, 2);
+      ctx.fillRect(p.pos.x, p.pos.y + offsetY, p.size.x, 2);
+      
       // Eye
       ctx.fillStyle = 'white';
-      ctx.fillRect(state.player.pos.x + 8, state.player.pos.y + 4, 2, 2);
+      ctx.fillRect(p.pos.x + 8, p.pos.y + 4 + offsetY, 2, 2);
+
+      // Dash Blur
+      if (isDashing) {
+        ctx.fillStyle = 'rgba(96, 165, 250, 0.4)';
+        ctx.fillRect(p.pos.x - 8, p.pos.y, p.size.x, p.size.y);
+        ctx.fillRect(p.pos.x - 16, p.pos.y, p.size.x, p.size.y);
+      }
+
+      // Hit Flash
+      if (p.hitFlash && p.hitFlash > 0) {
+        ctx.fillStyle = 'white';
+        ctx.globalAlpha = 0.8;
+        ctx.fillRect(p.pos.x, p.pos.y, p.size.x, p.size.y);
+        ctx.globalAlpha = 1.0;
+      }
     }
 
     // 9. Bullets
@@ -219,6 +313,14 @@ export default function Game() {
       const b = state.boss;
       ctx.fillStyle = b.color || '#888888';
       ctx.fillRect(b.pos.x, b.pos.y, b.size.x, b.size.y);
+
+      // Hit Flash
+      if (b.hitFlash && b.hitFlash > 0) {
+        ctx.fillStyle = 'white';
+        ctx.globalAlpha = 0.8;
+        ctx.fillRect(b.pos.x, b.pos.y, b.size.x, b.size.y);
+        ctx.globalAlpha = 1.0;
+      }
       
       // Rotating Shield Arms
       const rotation = (state.score * 0.05);
@@ -282,20 +384,22 @@ export default function Game() {
         // Boss Arm Tips
         const rotation = (state.score * 0.05);
         for (let i = 0; i < 3; i++) {
-          const angle = rotation + (i * Math.PI * 2) / 3;
+          const angle = (rotation + (i * Math.PI * 2) / 3) % (Math.PI * 2);
           const armX = state.boss.pos.x + 24 + Math.cos(angle) * 30;
           const armY = state.boss.pos.y + 24 + Math.sin(angle) * 30;
-          ctx.strokeRect(armX - 3, armY - 3, 6, 6);
+          ctx.strokeRect(armX - 4, armY - 4, 8, 8);
         }
       }
     }
+
+    ctx.restore();
   };
 
   const renderHUD = (ctx: CanvasRenderingContext2D, state: GameState) => {
-    // Score
+    // Score (Ticking)
     ctx.font = '8px monospace';
     ctx.fillStyle = COLORS.UI_TEXT;
-    ctx.fillText(`SCORE: ${state.score.toString().padStart(6, '0')}`, 10, 15);
+    ctx.fillText(`SCORE: ${state.displayScore.toString().padStart(6, '0')}`, 10, 15);
     ctx.fillText(`HI: ${state.playerStats.highScore.toString().padStart(6, '0')}`, GBA_WIDTH - 70, 15);
 
     // Health (Hearts)
@@ -309,12 +413,15 @@ export default function Game() {
 
       if (i < state.player.hp) {
         ctx.fillStyle = '#FF0000';
+        // Pulse heart if low health
+        const pulse = state.player.hp === 1 ? Math.sin(state.score * 0.2) * 2 : 0;
+        
         // Draw heart shape
-        ctx.fillRect(x + 2, y, 2, 2);
-        ctx.fillRect(x + 6, y, 2, 2);
-        ctx.fillRect(x, y + 2, 10, 4);
-        ctx.fillRect(x + 2, y + 6, 6, 2);
-        ctx.fillRect(x + 4, y + 8, 2, 2);
+        ctx.fillRect(x + 2, y - pulse/2, 2, 2 + pulse);
+        ctx.fillRect(x + 6, y - pulse/2, 2, 2 + pulse);
+        ctx.fillRect(x, y + 2 - pulse/2, 10, 4 + pulse);
+        ctx.fillRect(x + 2, y + 6 - pulse/2, 6, 2 + pulse);
+        ctx.fillRect(x + 4, y + 8 - pulse/2, 2, 2 + pulse);
         
         // Shine
         ctx.fillStyle = 'rgba(255,255,255,0.5)';
@@ -331,15 +438,27 @@ export default function Game() {
 
     // Combo
     if (state.combo > 2) {
+      const pulse = 1 + Math.sin(state.score * 0.1) * 0.1;
+      ctx.save();
+      ctx.translate(10, 45);
+      ctx.scale(pulse, pulse);
       ctx.font = '10px monospace';
       ctx.fillStyle = '#FFFF00';
-      ctx.fillText(`${state.combo} COMBO!`, 10, 45);
+      ctx.shadowColor = 'rgba(0,0,0,0.5)';
+      ctx.shadowBlur = 4;
+      ctx.fillText(`${state.combo} COMBO!`, 0, 0);
+      ctx.restore();
     }
 
-    // Kill Zone Warning
-    if (state.player.pos.x < 32) {
-      ctx.fillStyle = `rgba(255, 0, 0, ${0.2 + Math.sin(state.score * 0.2) * 0.1})`;
-      ctx.fillRect(0, 0, 16, GBA_HEIGHT);
+    // Kill Zone Warning (Crumbling Wall)
+    if (state.player.pos.x < 48) {
+      const opacity = 0.2 + Math.sin(state.score * 0.2) * 0.1;
+      ctx.fillStyle = `rgba(255, 0, 0, ${opacity})`;
+      // Draw a "crumbling" pattern
+      for (let i = 0; i < GBA_HEIGHT; i += 8) {
+        const wobble = Math.sin(state.score * 0.1 + i) * 4;
+        ctx.fillRect(0, i, 16 + wobble, 8);
+      }
     }
   };
 
@@ -459,32 +578,77 @@ export default function Game() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm rounded-[40px] z-20"
+              className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-md rounded-[40px] z-20 p-6"
             >
-              <div className="bg-neutral-900 p-8 rounded-3xl border-2 border-neutral-700 text-center shadow-2xl">
-                <Pause className="w-12 h-12 text-white mx-auto mb-4" />
-                <h2 className="text-3xl font-black text-white mb-8 uppercase italic">Paused</h2>
+              <div className="bg-neutral-900 w-full max-w-sm p-6 rounded-3xl border-2 border-neutral-700 shadow-2xl overflow-y-auto max-h-[90%] custom-scrollbar">
+                <div className="flex items-center justify-center gap-3 mb-6">
+                  <Pause className="w-8 h-8 text-white" />
+                  <h2 className="text-2xl font-black text-white uppercase italic">Paused</h2>
+                </div>
                 
-                <div className="space-y-4 mb-8 text-left">
-                  <div className="flex items-center justify-between gap-8 text-neutral-400 text-xs uppercase">
-                    <span className="flex items-center gap-2"><Zap className="w-3 h-3" /> Damage</span>
-                    <span className="text-white font-bold">{gameState.playerStats.damage}</span>
+                <div className="grid grid-cols-3 gap-2 mb-8">
+                  <div className="bg-black/40 p-2 rounded-lg border border-neutral-800 text-center">
+                    <Zap className="w-4 h-4 text-yellow-500 mx-auto mb-1" />
+                    <p className="text-[8px] text-neutral-500 uppercase">Damage</p>
+                    <p className="text-sm font-bold text-white">{gameState.playerStats.damage}</p>
                   </div>
-                  <div className="flex items-center justify-between gap-8 text-neutral-400 text-xs uppercase">
-                    <span className="flex items-center gap-2"><Shield className="w-3 h-3" /> Armor</span>
-                    <span className="text-white font-bold">{gameState.playerStats.armor}</span>
+                  <div className="bg-black/40 p-2 rounded-lg border border-neutral-800 text-center">
+                    <Shield className="w-4 h-4 text-blue-500 mx-auto mb-1" />
+                    <p className="text-[8px] text-neutral-500 uppercase">Armor</p>
+                    <p className="text-sm font-bold text-white">{gameState.playerStats.armor}</p>
                   </div>
-                  <div className="flex items-center justify-between gap-8 text-neutral-400 text-xs uppercase">
-                    <span className="flex items-center gap-2"><ArrowUpCircle className="w-3 h-3" /> Jump</span>
-                    <span className="text-white font-bold">{gameState.playerStats.jumpHeight.toFixed(1)}</span>
+                  <div className="bg-black/40 p-2 rounded-lg border border-neutral-800 text-center">
+                    <ArrowUpCircle className="w-4 h-4 text-green-500 mx-auto mb-1" />
+                    <p className="text-[8px] text-neutral-500 uppercase">Jump</p>
+                    <p className="text-sm font-bold text-white">{gameState.playerStats.jumpHeight.toFixed(1)}</p>
                   </div>
+                </div>
+
+                <div className="mb-8">
+                  <div className="flex items-center gap-2 mb-4 text-neutral-400 text-[10px] uppercase tracking-widest font-bold">
+                    <Keyboard className="w-4 h-4" />
+                    <span>Button Remapping</span>
+                  </div>
+                  <div className="space-y-2">
+                    {(['A', 'B', 'DASH', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'START', 'SELECT'] as GameAction[]).map(action => {
+                      const currentKey = Object.keys(inputMap).find(k => inputMap[k] === action);
+                      const isRemapping = remappingAction === action;
+                      
+                      return (
+                        <div key={action} className="flex items-center justify-between bg-black/20 p-2 rounded-lg border border-neutral-800">
+                          <span className="text-[10px] text-neutral-400 uppercase font-bold">
+                            {action === 'A' ? 'Jump' : action === 'B' ? 'Shoot' : action}
+                          </span>
+                          <button
+                            onClick={() => setRemappingAction(action)}
+                            className={`px-3 py-1 rounded text-[10px] font-bold transition-all ${
+                              isRemapping 
+                                ? 'bg-red-600 text-white animate-pulse' 
+                                : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
+                            }`}
+                          >
+                            {isRemapping ? 'Press Key...' : (currentKey?.replace('Key', '') || 'None')}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <button 
+                    onClick={() => {
+                      setInputMap(DEFAULT_INPUT_MAP);
+                      localStorage.setItem('mega_contra_input_map', JSON.stringify(DEFAULT_INPUT_MAP));
+                    }}
+                    className="mt-4 w-full py-2 text-[8px] text-neutral-500 uppercase font-bold hover:text-white transition-colors"
+                  >
+                    Reset to Defaults
+                  </button>
                 </div>
 
                 <button
                   onClick={() => setGameState(prev => ({ ...prev, isPaused: false }))}
-                  className="w-full py-3 bg-white text-black font-bold uppercase rounded-lg hover:bg-red-600 hover:text-white transition-colors"
+                  className="w-full py-4 bg-white text-black font-black uppercase tracking-widest rounded-xl hover:bg-red-600 hover:text-white transition-all duration-300 shadow-lg"
                 >
-                  Resume
+                  Resume Mission
                 </button>
               </div>
             </motion.div>
@@ -523,21 +687,29 @@ export default function Game() {
       </div>
 
       {/* Control Legend */}
-      <div className="mt-12 flex gap-12 text-neutral-500 text-[10px] uppercase font-bold tracking-widest">
+      <div className="mt-12 flex flex-wrap justify-center gap-8 text-neutral-500 text-[10px] uppercase font-bold tracking-widest">
         <div className="flex items-center gap-2">
-          <span className="w-6 h-6 flex items-center justify-center bg-neutral-800 rounded border border-neutral-700 text-white">X</span>
+          <span className="min-w-[1.5rem] h-6 px-2 flex items-center justify-center bg-neutral-800 rounded border border-neutral-700 text-white">
+            {Object.keys(inputMap).find(k => inputMap[k] === 'A')?.replace('Key', '') || '?'}
+          </span>
           Jump
         </div>
         <div className="flex items-center gap-2">
-          <span className="w-6 h-6 flex items-center justify-center bg-neutral-800 rounded border border-neutral-700 text-white">Z</span>
+          <span className="min-w-[1.5rem] h-6 px-2 flex items-center justify-center bg-neutral-800 rounded border border-neutral-700 text-white">
+            {Object.keys(inputMap).find(k => inputMap[k] === 'B')?.replace('Key', '') || '?'}
+          </span>
           Shoot
         </div>
         <div className="flex items-center gap-2">
-          <span className="w-12 h-6 flex items-center justify-center bg-neutral-800 rounded border border-neutral-700 text-white">Space</span>
+          <span className="min-w-[1.5rem] h-6 px-2 flex items-center justify-center bg-neutral-800 rounded border border-neutral-700 text-white">
+            {Object.keys(inputMap).find(k => inputMap[k] === 'DASH')?.replace('Space', 'SPC') || '?'}
+          </span>
           Dash
         </div>
         <div className="flex items-center gap-2">
-          <span className="w-8 h-6 flex items-center justify-center bg-neutral-800 rounded border border-neutral-700 text-white">Ent</span>
+          <span className="min-w-[1.5rem] h-6 px-2 flex items-center justify-center bg-neutral-800 rounded border border-neutral-700 text-white">
+            {Object.keys(inputMap).find(k => inputMap[k] === 'START')?.replace('Enter', 'ENT') || '?'}
+          </span>
           Pause
         </div>
       </div>
