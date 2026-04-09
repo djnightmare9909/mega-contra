@@ -1,0 +1,5 @@
+{
+  "name": "Mega Contra GBA",
+  "description": "A retro GBA-style auto-scrolling action roguelite inspired by Mega Man and Contra.",
+  "requestFramePermissions": []
+}
