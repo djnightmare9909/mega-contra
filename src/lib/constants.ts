@@ -103,17 +103,13 @@ export interface GameState {
   seed: number;
 }
 
-export type GameAction = 'A' | 'B' | 'UP' | 'DOWN' | 'LEFT' | 'RIGHT' | 'START' | 'SELECT' | 'DASH';
+export type GameAction = 'A' | 'B' | 'START' | 'SELECT' | 'DASH';
 
 export type InputMap = Record<string, GameAction>;
 
 export const DEFAULT_INPUT_MAP: InputMap = {
   KeyX: 'A', // Jump
   KeyZ: 'B', // Shoot
-  ArrowUp: 'UP',
-  ArrowDown: 'DOWN',
-  ArrowLeft: 'LEFT',
-  ArrowRight: 'RIGHT',
   Enter: 'START',
   ShiftLeft: 'SELECT',
   Space: 'DASH',

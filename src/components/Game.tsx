@@ -610,7 +610,7 @@ export default function Game() {
                     <span>Button Remapping</span>
                   </div>
                   <div className="space-y-2">
-                    {(['A', 'B', 'DASH', 'UP', 'DOWN', 'LEFT', 'RIGHT', 'START', 'SELECT'] as GameAction[]).map(action => {
+                    {(['A', 'B', 'DASH', 'START', 'SELECT'] as GameAction[]).map(action => {
                       const currentKey = Object.keys(inputMap).find(k => inputMap[k] === action);
                       const isRemapping = remappingAction === action;
                       

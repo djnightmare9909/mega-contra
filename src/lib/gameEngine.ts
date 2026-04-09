@@ -211,14 +211,8 @@ export const updateGame = (state: GameState, inputs: Set<string>, deltaTime: num
 
   const isOnGround = checkGroundCollision(player, newState);
 
-  // Horizontal Movement Input
-  if (inputs.has('LEFT')) {
-    player.vel.x -= (isOnGround ? MOVE_ACCEL : MOVE_ACCEL * AIR_CONTROL);
-  } else if (inputs.has('RIGHT')) {
-    player.vel.x += (isOnGround ? MOVE_ACCEL : MOVE_ACCEL * AIR_CONTROL);
-  } else {
-    player.vel.x *= FRICTION;
-  }
+  // Horizontal Movement Input (Removed for 3-button gameplay)
+  player.vel.x *= FRICTION;
 
   // Cap horizontal speed
   if (player.vel.x > MAX_MOVE_SPEED) player.vel.x = MAX_MOVE_SPEED;
@@ -279,9 +273,6 @@ export const updateGame = (state: GameState, inputs: Set<string>, deltaTime: num
     if (isOnGround || (player.coyoteTimer && player.coyoteTimer > 0)) {
       // First Jump (Ground or Coyote)
       player.vel.y = -playerStats.jumpHeight;
-      if (inputs.has('RIGHT')) {
-        player.vel.x += 1.0;
-      }
       player.coyoteTimer = 0;
       newState.bufferedJump = 0;
       player.canDoubleJump = true; // Reset double jump availability
@@ -302,9 +293,6 @@ export const updateGame = (state: GameState, inputs: Set<string>, deltaTime: num
       // Reset velocity completely to ensure the jump always feels the same regardless of fall speed
       player.vel.y = -playerStats.jumpHeight * 1.1; // Make double jump slightly stronger (110%)
       
-      if (inputs.has('RIGHT')) {
-        player.vel.x += 1.5;
-      }
       player.canDoubleJump = false; // Consume double jump
       player.state = 'double_jumping'; // Track double jump state
       newState.bufferedJump = 0;
@@ -332,7 +320,7 @@ export const updateGame = (state: GameState, inputs: Set<string>, deltaTime: num
   }
 
   // Horizontal target position (Handled by Camera Chasing above)
-  if (player.pos.x < targetX && !inputs.has('LEFT') && !inputs.has('RIGHT')) {
+  if (player.pos.x < targetX) {
     player.pos.x += 0.2; // Slightly faster return to target position when not moving
   }
 
@@ -660,11 +648,11 @@ const spawnEnemies = (state: GameState) => {
   if (state.bossActive) return;
 
   // DDA: Adjust spawn rate based on player performance
-  // If player is low on HP, slow down spawns
   const hpFactor = state.player.hp / state.player.maxHp;
-  const ddaSpawnDelay = hpFactor < 0.5 ? 60 : 0; // Extra frames delay if low HP
+  const ddaSpawnDelay = hpFactor < 0.3 ? 40 : 0; // Less mercy for the player
 
-  const spawnRate = (240 - Math.min(120, Math.floor(state.score / 2000) * 15)) + ddaSpawnDelay;
+  // Faster base spawn rate
+  const spawnRate = (120 - Math.min(80, Math.floor(state.score / 1500) * 10)) + ddaSpawnDelay;
   if (state.score % spawnRate === 0) {
     const rng = new Random(state.seed + state.score);
     
@@ -674,19 +662,20 @@ const spawnEnemies = (state: GameState) => {
 
     // Diversity Logic: Create a pool of available types
     const availableTypes: EnemyType[] = ['walker', 'shooter', 'flyer', 'runner'];
-    if (state.score > 8000) availableTypes.push('heavy');
+    if (state.score > 5000) availableTypes.push('heavy');
     
     // Pick a type, avoiding the last one if possible to ensure diversity
     let subType = availableTypes[rng.nextInt(0, availableTypes.length - 1)];
-    if (subType === state.lastEnemyType && availableTypes.length > 1) {
-      subType = availableTypes[(availableTypes.indexOf(subType) + 1) % availableTypes.length];
-    }
     state.lastEnemyType = subType;
 
     let hp = 1;
     let color = '#00FF00';
     let size = { x: 8, y: 12 };
-    let vel = { x: -1.0, y: 0 };
+    let vel = { x: -1.2, y: 0 };
+    
+    // Decide spawn side: 100% front (Simplified for 3-button gameplay)
+    const spawnX = GBA_WIDTH + 20;
+    vel.x = -1.2; 
 
     // Anchor System: Find ground at spawn point
     const worldX = state.scrollX + GBA_WIDTH;
@@ -723,37 +712,29 @@ const spawnEnemies = (state: GameState) => {
     // Base stats per type
     switch (subType) {
       case 'walker':
-        color = '#4ade80'; // Emerald
+        color = '#4ade80';
         break;
       case 'shooter':
-        hp = 1;
-        color = '#f87171'; // Red
+        color = '#f87171';
         break;
       case 'flyer':
-        hp = 1;
-        color = '#fbbf24'; // Amber
+        color = '#fbbf24';
+        vel.x = -1.2;
         break;
       case 'runner':
-        hp = 1;
-        color = '#60a5fa'; // Blue
-        vel.x = -1.8;
+        color = '#60a5fa';
+        vel.x = -2.5;
         break;
       case 'heavy':
-        hp = 1;
-        color = '#94a3b8'; // Slate
+        color = '#94a3b8';
         size = { x: 16, y: 16 };
+        vel.x = -0.8;
         break;
     }
 
     let y = anchorY !== -1 ? anchorY - size.y : GBA_HEIGHT / 2;
-
     if (subType === 'flyer') {
-      const maxDelta = 7 * TILE_SIZE; // JumpHeight * 0.85
-      const targetY = (anchorY !== -1 ? anchorY : GBA_HEIGHT / 2) - rng.nextInt(20, 60);
-      y = Math.max(20, targetY);
-      if (anchorY !== -1 && anchorY - y > maxDelta) {
-        y = anchorY - maxDelta;
-      }
+      y = rng.nextInt(20, GBA_HEIGHT - 60);
     }
 
     // Elite Variation: 15% chance for an "Elite" enemy with distinct color
@@ -768,7 +749,7 @@ const spawnEnemies = (state: GameState) => {
       id: Math.random().toString(),
       type: 'enemy',
       subType,
-      pos: { x: GBA_WIDTH, y },
+      pos: { x: spawnX, y },
       vel,
       size,
       hp,
@@ -783,20 +764,28 @@ const updateEnemies = (state: GameState) => {
   const { player } = state;
   
   state.enemies = state.enemies.filter(e => e.active).map(e => {
+    // Simple AI: Move in a consistent direction (No circling)
     if (e.subType === 'flyer') {
-      e.pos.y += Math.sin(state.score * 0.1) * 1;
+      // Flyers bob up and down but keep moving forward
+      e.pos.y += Math.sin(state.score * 0.1) * 0.5;
     }
     
     e.pos.x += e.vel.x;
-    if (e.pos.x < -40) e.active = false;
+    e.pos.y += e.vel.y;
 
-    // Shooting for Shooter type
-    if (e.subType === 'shooter' && state.score % 90 === 0) {
+    if (e.pos.x < -100) e.active = false;
+
+    // Shooting for Shooter type: Aim at player but only when in front
+    if (e.subType === 'shooter' && state.score % 80 === 0 && e.pos.x > player.pos.x) {
+      const dx = player.pos.x - e.pos.x;
+      const dy = player.pos.y - e.pos.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
       state.enemyBullets.push({
         id: Math.random().toString(),
         type: 'bullet',
         pos: { x: e.pos.x, y: e.pos.y + 4 },
-        vel: { x: -2, y: 0 },
+        vel: { x: (dx / dist) * 2, y: (dy / dist) * 2 },
         size: { x: 4, y: 4 },
         hp: 1,
         maxHp: 1,
