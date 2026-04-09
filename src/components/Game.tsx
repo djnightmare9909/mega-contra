@@ -12,12 +12,12 @@ import { Trophy, Play, RotateCcw, Pause, Heart, Zap, Shield, ArrowUpCircle, Targ
 export default function Game() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [gameState, setGameState] = useState<GameState>(() => {
-    const saved = localStorage.getItem('mega_contra_stats');
+    const saved = localStorage.getItem('rambo_tato_stats');
     const stats = saved ? JSON.parse(saved) : undefined;
     return createInitialState(Date.now(), stats);
   });
   const [inputMap, setInputMap] = useState<InputMap>(() => {
-    const saved = localStorage.getItem('mega_contra_input_map');
+    const saved = localStorage.getItem('rambo_tato_input_map');
     return saved ? JSON.parse(saved) : DEFAULT_INPUT_MAP;
   });
   const [remappingAction, setRemappingAction] = useState<GameAction | null>(null);
@@ -27,7 +27,7 @@ export default function Game() {
 
   // Save stats on change
   useEffect(() => {
-    localStorage.setItem('mega_contra_stats', JSON.stringify(gameState.playerStats));
+    localStorage.setItem('rambo_tato_stats', JSON.stringify(gameState.playerStats));
   }, [gameState.playerStats]);
 
   // Handle Keyboard Inputs
@@ -42,7 +42,7 @@ export default function Game() {
         // Assign new key
         newMap[e.code] = remappingAction;
         setInputMap(newMap);
-        localStorage.setItem('mega_contra_input_map', JSON.stringify(newMap));
+        localStorage.setItem('rambo_tato_input_map', JSON.stringify(newMap));
         setRemappingAction(null);
         e.preventDefault();
         return;
@@ -529,7 +529,7 @@ export default function Game() {
           </div>
           
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-[10px] text-neutral-600 font-bold tracking-[0.2em] uppercase">
-            Mega Contra GBA
+            Rambo tato
           </div>
         </div>
 
@@ -543,7 +543,7 @@ export default function Game() {
               className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 rounded-[40px] z-20 p-12 text-center"
             >
               <h1 className="text-6xl font-black text-white mb-2 italic tracking-tighter uppercase">
-                Mega <span className="text-red-600">Contra</span>
+                Rambo <span className="text-red-600">tato</span>
               </h1>
               <p className="text-neutral-400 mb-12 uppercase tracking-[0.3em] text-sm">Infinite Roguelite</p>
               
@@ -636,7 +636,7 @@ export default function Game() {
                   <button 
                     onClick={() => {
                       setInputMap(DEFAULT_INPUT_MAP);
-                      localStorage.setItem('mega_contra_input_map', JSON.stringify(DEFAULT_INPUT_MAP));
+                      localStorage.setItem('rambo_tato_input_map', JSON.stringify(DEFAULT_INPUT_MAP));
                     }}
                     className="mt-4 w-full py-2 text-[8px] text-neutral-500 uppercase font-bold hover:text-white transition-colors"
                   >

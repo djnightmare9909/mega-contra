@@ -14,7 +14,7 @@ export const COLORS = {
   BG_MID: '#2F4F4F',
   GROUND: '#8B4513',
   GROUND_TOP: '#228B22',
-  PLAYER: '#0000FF',
+  PLAYER: '#704214', // Potato Brown
   PLAYER_ACCENT: '#FF0000', // Bandana
   ENEMY_WALKER: '#00FF00',
   ENEMY_SHOOTER: '#FF0000',
